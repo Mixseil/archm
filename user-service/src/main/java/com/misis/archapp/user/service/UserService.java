@@ -1,12 +1,16 @@
 package com.misis.archapp.user.service;
 
+import com.misis.archapp.contract.dto.UserCreatedEvent;
 import com.misis.archapp.user.db.User;
 import com.misis.archapp.user.db.UserRepository;
 import com.misis.archapp.user.dto.UserCreateDTO;
 import com.misis.archapp.user.dto.UserDTO;
 import com.misis.archapp.user.dto.UserUpdateDTO;
 import com.misis.archapp.user.dto.mapper.UserMapper;
+import com.misis.archapp.user.service.cache.UserCacheService;
+import com.misis.archapp.user.service.publisher.UserEventPublisher;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,18 +21,25 @@ import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class UserService {
+
     private static final Logger LOGGER = LoggerFactory.getLogger(UserService.class);
 
     private final UserRepository userRepository;
     private final UserMapper userMapper;
+    private final UserCacheService userCacheService;
+    private final UserEventPublisher userEventPublisher;
 
     @Autowired
     public UserService(
-        UserRepository userRepository,
-        UserMapper userMapper
+            UserRepository userRepository,
+            UserMapper userMapper,
+            UserCacheService userCacheService,
+            UserEventPublisher userEventPublisher
     ) {
         this.userRepository = userRepository;
         this.userMapper = userMapper;
+        this.userCacheService = userCacheService;
+        this.userEventPublisher = userEventPublisher;
     }
 
     public List<UserDTO> getAllUsers() {
@@ -36,19 +47,35 @@ public class UserService {
     }
 
     public UserDTO getUserById(UUID id) {
-        return userRepository.findById(id).map(userMapper::toDTO)
-            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        Optional<UserDTO> cachedUser = userCacheService.getFromCache(id);
+
+        if (cachedUser.isPresent()) {
+            LOGGER.info("User cache hit");
+            return cachedUser.get();
+        }
+
+        LOGGER.info("User cache miss");
+        UserDTO userFromDB = userRepository.findById(id).map(userMapper::toDTO)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+
+        userCacheService.saveToCache(userFromDB);
+        return userFromDB;
     }
 
     public UserDTO createUser(UserCreateDTO userCreateDTO) {
         User user = userMapper.toEntity(userCreateDTO);
         User savedUser = userRepository.save(user);
+
+        // Отправляем ивент о создании пользователя
+        UserCreatedEvent userCreatedEvent = new UserCreatedEvent(user.getId(), user.getEmail(), user.getName());
+        userEventPublisher.publishUserEvent(userCreatedEvent);
+
         return userMapper.toDTO(savedUser);
     }
 
     public UserDTO updateUser(UUID id, UserUpdateDTO userUpdateDTO) {
         User user = userRepository.findById(id)
-            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
 
         if (userUpdateDTO.name().isPresent()) {
             user.setName(userUpdateDTO.name().get());
@@ -60,11 +87,16 @@ public class UserService {
 
         User savedUser = userRepository.save(user);
 
+        LOGGER.info("User cache evict on update");
+        userCacheService.removeFromCache(user.getId());
+
         return userMapper.toDTO(savedUser);
     }
 
     public void deleteUser(UUID id) {
         userRepository.deleteById(id);
+        LOGGER.info("User cache evict on delete");
+        userCacheService.removeFromCache(id);
     }
 
 }

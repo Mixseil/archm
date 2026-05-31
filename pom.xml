@@ -33,6 +33,7 @@
                 <groupId>com.misis</groupId>
                 <artifactId>shared-contract</artifactId>
                 <version>${app.version}</version>
+
             </dependency>
             <!-- конец общих модулей -->
 
